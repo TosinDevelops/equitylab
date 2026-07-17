@@ -1,0 +1,197 @@
+from datetime import date, timedelta
+
+import streamlit as st
+
+from equitylab.data.loaders.yahoo import load_data
+from equitylab.screening import ScreenConfig, UniverseConfig, run_screen
+
+st.set_page_config(page_title="EquityLab", layout="wide")
+st.title("EquityLab")
+st.caption("Screen stocks, then chart any match over the selected date range.")
+
+today = date.today()
+default_start = today - timedelta(days=365)
+
+if "screen_results" not in st.session_state:
+    st.session_state.screen_results = None
+if "screen_errors" not in st.session_state:
+    st.session_state.screen_errors = []
+if "screen_label" not in st.session_state:
+    st.session_state.screen_label = ""
+if "screen_range" not in st.session_state:
+    st.session_state.screen_range = (default_start, today)
+
+with st.sidebar:
+    st.header("Date range")
+    start_date, end_date = st.date_input(
+        "Range",
+        value=st.session_state.screen_range,
+        max_value=today,
+    )
+
+    st.header("Universe (Yahoo)")
+    st.caption("Always fetches 150 Yahoo candidates (volume-sorted). Post-screen keeps the first N that qualify.")
+    max_tickers = st.number_input(
+        "Max tickers",
+        min_value=1,
+        max_value=50,
+        value=50,
+        step=5,
+        help="After post-filters, keep the first N qualifiers (in Yahoo volume order). Cap 50.",
+    )
+    min_market_cap_b = st.number_input("Min market cap ($B)", min_value=0.0, value=0.5, step=0.1)
+    max_market_cap_b = st.number_input(
+        "Max market cap ($B, 0 = none)",
+        min_value=0.0,
+        value=100.0,
+        step=1.0,
+    )
+    min_price = st.number_input("Min price ($)", min_value=0.0, value=5.0, step=0.5)
+    min_avg_vol = st.number_input("Min avg daily volume (3m)", min_value=0, value=500_000, step=50_000)
+
+    st.header("Screen")
+    max_drawdown_pct = st.slider(
+        "Max 52w drawdown",
+        min_value=0,
+        max_value=90,
+        value=90,
+        step=5,
+        format="%d%%",
+        help="Allow names down by at most this much from the 52-week high. 90% includes 50%, 10%, etc.",
+    )
+    max_rsi = st.slider("Max RSI (14)", min_value=0.0, max_value=100.0, value=40.0, step=1.0)
+    min_rel_vol = st.slider("Min relative volume (20d)", min_value=0.5, max_value=5.0, value=1.2, step=0.1)
+    use_sma_band = st.checkbox("Filter distance from 200D SMA", value=False)
+    min_sma_dist = None
+    max_sma_dist = None
+    if use_sma_band:
+        min_sma_dist = st.number_input("Min distance from SMA200", value=-0.20, step=0.05, format="%.2f")
+        max_sma_dist = st.number_input("Max distance from SMA200", value=0.05, step=0.05, format="%.2f")
+
+    run = st.button("Run screen", type="primary", width="stretch")
+
+if not isinstance(start_date, date) or not isinstance(end_date, date):
+    st.error("Select both a start and end date.")
+    st.stop()
+
+if start_date > end_date:
+    st.error("Start date must be on or before end date.")
+    st.stop()
+
+if end_date - start_date < timedelta(days=200):
+    st.warning("Range is short for SMA200 / 52w stats — screener still extends lookback automatically.")
+
+if run:
+    universe = UniverseConfig(
+        min_market_cap=min_market_cap_b * 1_000_000_000,
+        max_market_cap=(max_market_cap_b * 1_000_000_000) if max_market_cap_b > 0 else None,
+        min_price=float(min_price),
+        min_avg_daily_volume=float(min_avg_vol),
+    )
+    screen = ScreenConfig(
+        max_drawdown_52w=-float(max_drawdown_pct) / 100.0,  # UI is positive %; filter uses signed drawdown
+        max_rsi=float(max_rsi),
+        min_relative_volume=float(min_rel_vol),
+        min_distance_from_sma_200=float(min_sma_dist) if min_sma_dist is not None else None,
+        max_distance_from_sma_200=float(max_sma_dist) if max_sma_dist is not None else None,
+    )
+
+    progress = st.progress(0.0, text="Fetching Yahoo universe…")
+
+    def on_progress(fraction: float, message: str) -> None:
+        progress.progress(min(max(fraction, 0.0), 1.0), text=message)
+
+    try:
+        results, errors = run_screen(
+            universe,
+            screen,
+            start=start_date,
+            end=end_date,
+            max_qualifiers=int(max_tickers),
+            progress=on_progress,
+        )
+    except Exception as exc:
+        progress.empty()
+        st.error(f"Screen failed: {exc}")
+        st.stop()
+
+    progress.empty()
+    st.session_state.screen_results = results
+    st.session_state.screen_errors = errors
+    st.session_state.screen_label = screen.label
+    st.session_state.screen_range = (start_date, end_date)
+    st.session_state.selected_ticker = None
+
+results = st.session_state.screen_results
+if results is None:
+    st.info("Configure filters in the sidebar, then click **Run screen**.")
+    st.stop()
+
+if results.empty:
+    st.warning("No tickers scored. Try loosening universe filters.")
+    if st.session_state.screen_errors:
+        with st.expander("Errors"):
+            st.write(st.session_state.screen_errors)
+    st.stop()
+
+passes = results.loc[results["entry_signal"]].copy() if "entry_signal" in results.columns else results
+st.subheader("Screen results")
+st.caption(st.session_state.screen_label)
+
+if passes.empty or not passes["entry_signal"].any():
+    st.warning("Fetched 150 Yahoo names and scored them, but none passed post-screen. Showing scored candidates.")
+    display = results.head(int(max_tickers))
+else:
+    display = passes if len(passes) <= int(max_tickers) else passes.head(int(max_tickers))
+
+tickers = list(display.index)
+
+show_cols = [
+    c
+    for c in [
+        "name",
+        "close",
+        "drawdown_52w",
+        "rsi_14",
+        "relative_volume_20",
+        "distance_from_sma_200",
+        "market_cap",
+        "signal_score",
+        "entry_signal",
+    ]
+    if c in display.columns
+]
+st.dataframe(display[show_cols], width="stretch")
+
+if st.session_state.screen_errors:
+    with st.expander(f"Skipped / errors ({len(st.session_state.screen_errors)})"):
+        st.write(st.session_state.screen_errors)
+
+default_ticker = st.session_state.get("selected_ticker")
+if default_ticker not in tickers:
+    default_ticker = tickers[0]
+
+selected = st.selectbox(
+    "Chart ticker",
+    options=tickers,
+    index=tickers.index(default_ticker),
+)
+st.session_state.selected_ticker = selected
+
+chart_start, chart_end = st.session_state.screen_range
+try:
+    with st.spinner(f"Loading {selected}…"):
+        prices = load_data(
+            selected,
+            interval="1d",
+            start=chart_start.isoformat(),
+            end=chart_end.isoformat(),
+        )
+except Exception as exc:
+    st.error(f"Failed to load {selected}: {exc}")
+    st.stop()
+
+st.subheader(selected)
+st.write(f"{len(prices)} bars · {prices.index.min().date()} → {prices.index.max().date()}")
+st.line_chart(prices["close"], height=320)
+st.dataframe(prices, width="stretch")

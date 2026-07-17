@@ -1,0 +1,30 @@
+[project]
+name = "equitylab"
+version = "0.0.1"
+authors = [
+  { name="Tosin", email="author@example.com" },
+]
+description = "EquityLab a new trading platform"
+readme = "README.md"
+requires-python = ">=3.10,<3.14"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "numpy",
+    "pandas",
+    "streamlit",
+    "yfinance"
+]
+license = "MIT"
+license-files = ["LICEN[CS]E*"]
+
+[project.urls]
+Homepage = "https://github.com/tosindevelops/sampleproject"
+Issues = "https://github.com/pypa/sampleproject/issues"
+
+
+[build-system]
+requires = ["uv_build>=0.11.23,<0.12.0"]
+build-backend = "uv_build"
