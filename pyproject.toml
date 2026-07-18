@@ -2,9 +2,9 @@
 name = "equitylab"
 version = "0.0.1"
 authors = [
-  { name="Tosin", email="author@example.com" },
+  { name="Tosin Ogundimu", email="140530539+oowoo123@users.noreply.github.com" },
 ]
-description = "EquityLab a new trading platform"
+description = "Screen equities, then train and backtest a leakage-safe walk-forward ML strategy."
 readme = "README.md"
 requires-python = ">=3.10,<3.14"
 classifiers = [
@@ -20,12 +20,12 @@ dependencies = [
     "xgboost>=3.2.0",
     "yfinance",
 ]
-license = "MIT"
+license = "Apache-2.0"
 license-files = ["LICEN[CS]E*"]
 
 [project.urls]
-Homepage = "https://github.com/tosindevelops/sampleproject"
-Issues = "https://github.com/pypa/sampleproject/issues"
+Homepage = "https://github.com/TosinDevelops/equitylab"
+Issues = "https://github.com/TosinDevelops/equitylab/issues"
 
 
 [build-system]
