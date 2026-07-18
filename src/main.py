@@ -26,7 +26,10 @@ if "strategy_result" not in st.session_state:
     st.session_state.strategy_result = None
 # Drop cached results built with an older StrategyConfig (missing newer fields).
 _cached = st.session_state.strategy_result
-if _cached is not None and not hasattr(_cached.config, "profit_drawdown"):
+if _cached is not None and (
+    not hasattr(_cached.config, "profit_drawdown")
+    or not hasattr(_cached.config, "model_horizon_exit")
+):
     st.session_state.strategy_result = None
 
 with st.sidebar:
@@ -93,14 +96,22 @@ with st.sidebar:
         step=0.5,
         help="Enter when model predicts N-day buy→sell return at least this high.",
     )
-    profit_drawdown_pct = st.number_input(
-        "Profit drawdown exit (%)",
-        min_value=1.0,
-        max_value=50.0,
-        value=5.0,
-        step=1.0,
-        help="Exit when close falls this far below the peak price since entry.",
+    model_horizon_exit = st.checkbox(
+        "Exit on model horizon",
+        value=False,
+        help="Exit at the hold day the model predicts is best (argmax of 1..N returns).",
     )
+    use_profit_drawdown = st.checkbox("Use profit drawdown exit", value=True)
+    profit_drawdown_pct = 5.0
+    if use_profit_drawdown:
+        profit_drawdown_pct = st.number_input(
+            "Profit drawdown exit (%)",
+            min_value=1.0,
+            max_value=50.0,
+            value=5.0,
+            step=1.0,
+            help="Exit when close falls this far below the peak price since entry.",
+        )
     cost_bps = st.number_input("Cost (bps per side)", min_value=0.0, value=5.0, step=1.0)
     use_stops = st.checkbox("Use stop / take-profit", value=False)
     stop_loss = None
@@ -235,7 +246,8 @@ if run_wf:
         train_fraction=float(train_fraction),
         entry_min_return=float(entry_min_return_pct) / 100.0,
         exit_min_return=None,
-        profit_drawdown=float(profit_drawdown_pct) / 100.0,
+        profit_drawdown=(float(profit_drawdown_pct) / 100.0) if use_profit_drawdown else None,
+        model_horizon_exit=bool(model_horizon_exit),
         cost_bps=float(cost_bps),
         stop_loss=float(stop_loss) if stop_loss is not None else None,
         take_profit=float(take_profit) if take_profit is not None else None,
@@ -262,19 +274,19 @@ if run_wf:
 strategy_result = st.session_state.strategy_result
 if strategy_result is not None:
     st.subheader("Walk-forward strategy (OOS)")
-    trail = (
-        f" · trail DD {strategy_result.config.profit_drawdown:.0%}"
-        if strategy_result.config.profit_drawdown is not None
-        else ""
-    )
+    exit_bits: list[str] = []
+    if strategy_result.config.model_horizon_exit:
+        exit_bits.append("model horizon exit")
+    if strategy_result.config.profit_drawdown is not None:
+        exit_bits.append(f"trail DD {strategy_result.config.profit_drawdown:.0%}")
+    exit_bits.append(f"hold ≤ {strategy_result.config.max_holding_days}d")
     st.caption(
         f"Train through {strategy_result.train_end.date()} · "
         f"Test from {strategy_result.test_start.date()} · "
         f"{len(strategy_result.tickers)} tickers · "
         f"max {strategy_result.config.max_positions} positions · "
-        f"hold ≤ {strategy_result.config.max_holding_days}d · "
-        f"enter pred ≥ {strategy_result.config.entry_min_return:.1%}"
-        f"{trail}"
+        f"enter pred ≥ {strategy_result.config.entry_min_return:.1%} · "
+        + " · ".join(exit_bits)
     )
 
     oos = strategy_result.oos_backtest

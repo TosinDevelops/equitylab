@@ -7,16 +7,19 @@ import pandas as pd
 from sklearn.ensemble import HistGradientBoostingRegressor
 from sklearn.inspection import permutation_importance
 from sklearn.metrics import mean_absolute_error, r2_score
+from sklearn.multioutput import MultiOutputRegressor
 
 from equitylab.signals.features import FEATURE_COLUMNS
+from equitylab.signals.labels import horizon_columns
 from equitylab.strategy.config import StrategyConfig
 
 SCORE_COL = "predicted_return"
+HOLD_COL = "predicted_hold_days"
 
 
 @dataclass(frozen=True)
 class WalkForwardModelResult:
-    model: HistGradientBoostingRegressor
+    model: MultiOutputRegressor
     feature_columns: list[str]
     train_end: pd.Timestamp
     test_start: pd.Timestamp
@@ -47,10 +50,9 @@ def label_embargo_cutoff(
     max_holding_days: int,
 ) -> pd.Timestamp:
     """
-    Last feature date whose N-day forward label ends on or before train_end.
+    Last feature date whose longest forward label ends on or before train_end.
 
-    forward_return at t uses close[t+N]; require t+N <= train_end in trading-day space
-    so training labels never observe prices from the test period.
+    Labels use closes through t+N; require t+N <= train_end in trading-day space.
     """
     if max_holding_days < 1:
         raise ValueError("max_holding_days must be >= 1")
@@ -62,7 +64,6 @@ def label_embargo_cutoff(
             f"Not enough train dates ({len(train_dates)}) for "
             f"max_holding_days={max_holding_days} embargo"
         )
-    # Index i is valid iff i + max_holding_days <= last train index
     return pd.Timestamp(train_dates[-(max_holding_days + 1)])
 
 
@@ -73,10 +74,10 @@ def fit_predict_walkforward(
     random_state: int = 42,
 ) -> WalkForwardModelResult:
     """
-    Train a regressor on realized buy→sell profit over max_holding_days.
+    Train a multi-horizon regressor on forward returns for every day 1..N.
 
-    Target y = forward_return = close[t+N]/close[t] - 1
-    (what you would have made holding N days). Predict that on OOS days.
+    y = [close[t+1]/close[t]-1, ..., close[t+N]/close[t]-1]
+    Score for ranking/entry = max predicted horizon return (best expected exit day).
 
     Train rows are embargoed so labels cannot reach past train_end into the test window.
     """
@@ -86,8 +87,11 @@ def fit_predict_walkforward(
     missing = [c for c in FEATURE_COLUMNS if c not in panel.columns]
     if missing:
         raise ValueError(f"panel missing feature columns: {missing}")
-    if "forward_return" not in panel.columns:
-        raise ValueError("panel missing forward_return column")
+
+    y_cols = horizon_columns(config.max_holding_days)
+    missing_y = [c for c in y_cols if c not in panel.columns]
+    if missing_y:
+        raise ValueError(f"panel missing horizon label columns: {missing_y}")
 
     dates = panel.index.get_level_values("date")
     train_end, test_start = chronological_split_dates(dates, config.train_fraction)
@@ -95,12 +99,10 @@ def fit_predict_walkforward(
         dates, train_end, config.max_holding_days
     )
 
-    # Features/labels for fit: only through embargo cutoff (label horizon ⊆ train period).
     train_mask = dates <= train_label_end
     test_mask = dates >= test_start
-    # Gap (train_label_end, train_end] is unused for fitting — purge / embargo zone.
 
-    train = panel.loc[train_mask].dropna(subset=[*FEATURE_COLUMNS, "forward_return"])
+    train = panel.loc[train_mask].dropna(subset=[*FEATURE_COLUMNS, *y_cols])
     test = panel.loc[test_mask].dropna(subset=FEATURE_COLUMNS)
 
     if train.empty:
@@ -108,35 +110,46 @@ def fit_predict_walkforward(
     if test.empty:
         raise ValueError("No valid test rows after dropping NaNs")
 
-    y_train = train["forward_return"].astype(float)
-    if float(y_train.std()) == 0.0:
+    y_train = train[y_cols].astype(float)
+    if float(y_train.stack().std()) == 0.0:
         raise ValueError("Training forward returns have zero variance")
 
-    model = HistGradientBoostingRegressor(
+    base = HistGradientBoostingRegressor(
         max_depth=5,
         learning_rate=0.1,
         max_iter=100,
         random_state=random_state,
     )
+    model = MultiOutputRegressor(base)
     x_train = train[FEATURE_COLUMNS]
     model.fit(x_train, y_train)
 
-    def _predict(frame: pd.DataFrame) -> np.ndarray:
-        return model.predict(frame[FEATURE_COLUMNS])
+    def _predict_horizons(frame: pd.DataFrame) -> np.ndarray:
+        """Predicted returns shape (n_rows, N) for horizons 1..N."""
+        return np.asarray(model.predict(frame[FEATURE_COLUMNS]), dtype=float)
 
-    train_pred_ret = _predict(train)
-    test_pred_ret = _predict(test)
+    train_horizons = _predict_horizons(train)
+    test_horizons = _predict_horizons(test)
+    train_pred_ret = train_horizons.max(axis=1)
+    test_pred_ret = test_horizons.max(axis=1)
+    # 1-based hold day with the best predicted return
+    train_pred_hold = train_horizons.argmax(axis=1) + 1
+    test_pred_hold = test_horizons.argmax(axis=1) + 1
 
     train_signal = train_pred_ret >= config.entry_min_return
     test_signal = test_pred_ret >= config.entry_min_return
 
+    # Metrics vs best realized horizon return (same aggregation as the score).
+    y_train_best = y_train.max(axis=1)
     train_metrics = {
-        "mae": float(mean_absolute_error(y_train, train_pred_ret)),
-        "r2": float(r2_score(y_train, train_pred_ret)),
+        "mae": float(mean_absolute_error(y_train_best, train_pred_ret)),
+        "r2": float(r2_score(y_train_best, train_pred_ret)),
         "n_rows": float(len(train)),
-        "mean_forward_return": float(y_train.mean()),
+        "mean_forward_return": float(y_train_best.mean()),
         "signal_rate": float(train_signal.mean()),
         "embargo_days": float(config.max_holding_days),
+        "n_horizons": float(len(y_cols)),
+        "mean_predicted_hold_days": float(np.mean(train_pred_hold)),
         "train_label_end": float(pd.Timestamp(train_label_end).value),
     }
 
@@ -144,14 +157,16 @@ def fit_predict_walkforward(
         "n_rows": float(len(test)),
         "signal_rate": float(test_signal.mean()),
         "mean_predicted_return": float(np.mean(test_pred_ret)),
+        "mean_predicted_hold_days": float(np.mean(test_pred_hold)),
+        "n_horizons": float(len(y_cols)),
     }
-    test_labeled = test.dropna(subset=["forward_return"])
+    test_labeled = test.dropna(subset=y_cols)
     if len(test_labeled) > 1:
-        y_test = test_labeled["forward_return"].astype(float)
-        pred_test = _predict(test_labeled)
-        test_metrics["mae"] = float(mean_absolute_error(y_test, pred_test))
-        test_metrics["r2"] = float(r2_score(y_test, pred_test))
-        test_metrics["mean_forward_return"] = float(y_test.mean())
+        y_test_best = test_labeled[y_cols].astype(float).max(axis=1)
+        pred_test = _predict_horizons(test_labeled).max(axis=1)
+        test_metrics["mae"] = float(mean_absolute_error(y_test_best, pred_test))
+        test_metrics["r2"] = float(r2_score(y_test_best, pred_test))
+        test_metrics["mean_forward_return"] = float(y_test_best.mean())
     else:
         test_metrics["mae"] = float("nan")
         test_metrics["r2"] = float("nan")
@@ -159,10 +174,13 @@ def fit_predict_walkforward(
 
     scored = panel.copy()
     scored[SCORE_COL] = np.nan
+    scored[HOLD_COL] = np.nan
     scored["entry_signal"] = False
     scored["entry_signal_is"] = False
     scored.loc[train.index, SCORE_COL] = train_pred_ret
     scored.loc[test.index, SCORE_COL] = test_pred_ret
+    scored.loc[train.index, HOLD_COL] = train_pred_hold.astype(float)
+    scored.loc[test.index, HOLD_COL] = test_pred_hold.astype(float)
     scored.loc[test.index, "entry_signal"] = test_signal
     scored.loc[train.index, "entry_signal_is"] = train_signal
 
@@ -170,10 +188,12 @@ def fit_predict_walkforward(
     if len(sample) > 2000:
         sample = sample.sample(2000, random_state=random_state)
     try:
+        # Importance from the first horizon estimator (representative).
+        first_est = model.estimators_[0]
         imp = permutation_importance(
-            model,
+            first_est,
             sample[FEATURE_COLUMNS],
-            sample["forward_return"].astype(float),
+            sample[y_cols[0]].astype(float),
             n_repeats=5,
             random_state=random_state,
             scoring="neg_mean_absolute_error",

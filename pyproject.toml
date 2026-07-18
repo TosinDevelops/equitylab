@@ -12,11 +12,12 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 dependencies = [
+    "duckdb>=1.5.4",
     "numpy",
     "pandas",
     "scikit-learn",
     "streamlit",
-    "yfinance"
+    "yfinance",
 ]
 license = "MIT"
 license-files = ["LICEN[CS]E*"]

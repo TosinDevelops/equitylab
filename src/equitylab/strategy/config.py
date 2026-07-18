@@ -13,6 +13,8 @@ class StrategyConfig:
     take_profit: float | None = None
     # Exit when close falls this far below the peak close since entry (e.g. 0.05 = 5%).
     profit_drawdown: float | None = 0.05
+    # If True, exit at the model's predicted best hold day (argmax over horizons 1..N).
+    model_horizon_exit: bool = False
     # walk-forward / ML: model predicts buy→sell profit over max_holding_days
     train_fraction: float = 0.80
     # Enter when predicted N-day return >= this.

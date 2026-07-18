@@ -127,8 +127,10 @@ def run_walkforward_strategy(
         take_profit=config.take_profit,
         exit_min_score=config.exit_min_return,
         profit_drawdown=config.profit_drawdown,
+        model_horizon_exit=config.model_horizon_exit,
         initial_capital=config.initial_capital,
         score_col="predicted_return",
+        hold_col="predicted_hold_days",
     )
     is_bt = simulate_portfolio(
         is_panel,
@@ -139,8 +141,10 @@ def run_walkforward_strategy(
         take_profit=config.take_profit,
         exit_min_score=config.exit_min_return,
         profit_drawdown=config.profit_drawdown,
+        model_horizon_exit=config.model_horizon_exit,
         initial_capital=config.initial_capital,
         score_col="predicted_return",
+        hold_col="predicted_hold_days",
     )
 
     if progress is not None:

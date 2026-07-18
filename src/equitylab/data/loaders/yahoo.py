@@ -44,8 +44,31 @@ def load_data(
     interval: str = "1m",
     start: str | None = None,
     end: str | None = None,
+    *,
+    use_cache: bool = True,
 ) -> pd.DataFrame:
+    """
+    Download OHLCV from Yahoo Finance.
+
+    Daily bars with an explicit start/end use a local DuckDB cache by default
+    (only missing date ranges hit the network). Pass use_cache=False to force
+    a fresh download.
+    """
     ticker = normalize_ticker(ticker)
+
+    if (
+        use_cache
+        and interval == "1d"
+        and start is not None
+        and end is not None
+    ):
+        from equitylab.data.cache import load_cached_prices
+
+        # yfinance end is exclusive; cache API is inclusive on both ends.
+        end_inclusive = (pd.Timestamp(end) - pd.Timedelta(days=1)).date()
+        start_d = pd.Timestamp(start).date()
+        if start_d <= end_inclusive:
+            return load_cached_prices(ticker, start_d, end_inclusive)
 
     download_kwargs: dict = {
         "tickers": ticker,

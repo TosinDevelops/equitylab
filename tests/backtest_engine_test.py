@@ -10,6 +10,7 @@ def _panel_from_closes(
     closes: dict[str, list[float]],
     signals: dict[str, list[bool]],
     scores: dict[str, list[float]],
+    holds: dict[str, list[float]] | None = None,
     start: str = "2024-01-01",
 ) -> pd.DataFrame:
     n = len(next(iter(closes.values())))
@@ -18,18 +19,19 @@ def _panel_from_closes(
     for ticker, series in closes.items():
         for i, day in enumerate(dates):
             price = series[i]
-            rows.append(
-                {
-                    "date": day,
-                    "ticker": ticker,
-                    "open": price,
-                    "high": price * 1.02,
-                    "low": price * 0.98,
-                    "close": price,
-                    "entry_signal": signals[ticker][i],
-                    "predicted_return": scores[ticker][i],
-                }
-            )
+            row = {
+                "date": day,
+                "ticker": ticker,
+                "open": price,
+                "high": price * 1.02,
+                "low": price * 0.98,
+                "close": price,
+                "entry_signal": signals[ticker][i],
+                "predicted_return": scores[ticker][i],
+            }
+            if holds is not None:
+                row["predicted_hold_days"] = holds[ticker][i]
+            rows.append(row)
     return pd.DataFrame(rows).set_index(["date", "ticker"]).sort_index()
 
 
@@ -111,6 +113,32 @@ def test_profit_drawdown_exits_from_peak() -> None:
     trade = result.trades.iloc[0]
     assert trade["exit_reason"] == "profit_drawdown"
     assert trade["exit_price"] == pytest.approx(100.0)
+
+
+def test_model_horizon_exit_on_predicted_hold_day() -> None:
+    # Signal day 0 with predicted hold = 2 → enter day 1, exit when hold_days hits 2
+    closes = {"AAA": [100.0, 100.0, 101.0, 102.0, 103.0]}
+    signals = {"AAA": [True, False, False, False, False]}
+    scores = {"AAA": [0.05, 0.05, 0.05, 0.05, 0.05]}
+    holds = {"AAA": [2.0, 2.0, 2.0, 2.0, 2.0]}
+    panel = _panel_from_closes(closes, signals, scores, holds=holds)
+
+    result = simulate_portfolio(
+        panel,
+        max_positions=1,
+        max_holding_days=10,
+        cost_bps=0.0,
+        exit_min_score=None,
+        profit_drawdown=None,
+        model_horizon_exit=True,
+    )
+
+    assert len(result.trades) == 1
+    trade = result.trades.iloc[0]
+    assert trade["exit_reason"] == "model_horizon"
+    assert trade["hold_days"] == 2
+    assert trade["target_hold_days"] == 2
+    assert trade["exit_price"] == pytest.approx(102.0)
 
 
 def test_model_exit_when_predicted_return_drops() -> None:

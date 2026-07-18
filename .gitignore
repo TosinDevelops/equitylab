@@ -216,3 +216,8 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Local DuckDB price cache
+*.duckdb
+*.duckdb.wal
+data/cache/

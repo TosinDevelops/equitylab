@@ -23,6 +23,7 @@ class _OpenPosition:
     entry_price: float
     shares: float
     score: float
+    target_hold_days: int
     hold_days: int = 0
     peak_price: float = 0.0
 
@@ -40,6 +41,7 @@ def _empty_trades() -> pd.DataFrame:
             "pnl",
             "pnl_pct",
             "hold_days",
+            "target_hold_days",
             "exit_reason",
             "score",
         ]
@@ -56,9 +58,11 @@ def simulate_portfolio(
     take_profit: float | None = None,
     exit_min_score: float | None = None,
     profit_drawdown: float | None = 0.05,
+    model_horizon_exit: bool = False,
     initial_capital: float = 100_000.0,
     signal_col: str = "entry_signal",
     score_col: str = "predicted_return",
+    hold_col: str = "predicted_hold_days",
 ) -> BacktestResult:
     """
     Day loop: fill pending entries, process exits, rank candidates, schedule next-close entries.
@@ -66,9 +70,8 @@ def simulate_portfolio(
     Expects MultiIndex (date, ticker) with close/high/low plus signal/score columns.
     A signal on day t schedules an entry at t+1 close if a slot is free.
 
-    While holding, track peak close since entry; if close falls profit_drawdown
-    below that peak, exit (profit giveback). Optional model exit via exit_min_score.
-    max_holding_days is a hard cap.
+    Exits (in order): stop / take-profit / profit_drawdown / model score drop /
+    model_horizon_exit (hold_days reaches predicted best day) / max_holding_days.
     """
     if max_positions < 1:
         raise ValueError("max_positions must be >= 1")
@@ -85,6 +88,8 @@ def simulate_portfolio(
         )
 
     required = {"close", "high", "low", signal_col, score_col}
+    if model_horizon_exit:
+        required.add(hold_col)
     missing = required - set(panel.columns)
     if missing:
         raise ValueError(f"panel missing columns: {sorted(missing)}")
@@ -93,7 +98,8 @@ def simulate_portfolio(
     cost = cost_bps / 10_000.0
     cash = float(initial_capital)
     open_positions: dict[str, _OpenPosition] = {}
-    pending: list[tuple[pd.Timestamp, pd.Timestamp, str, float]] = []
+    # (entry_date, signal_date, ticker, score, target_hold_days)
+    pending: list[tuple[pd.Timestamp, pd.Timestamp, str, float, int]] = []
     trades: list[dict] = []
     equity_points: list[tuple[pd.Timestamp, float]] = []
     position_counts: list[tuple[pd.Timestamp, int]] = []
@@ -132,6 +138,7 @@ def simulate_portfolio(
                 "pnl": proceeds - pos.shares * pos.entry_price,
                 "pnl_pct": exit_price / pos.entry_price - 1.0,
                 "hold_days": pos.hold_days,
+                "target_hold_days": pos.target_hold_days,
                 "exit_reason": reason,
                 "score": pos.score,
             }
@@ -139,10 +146,10 @@ def simulate_portfolio(
 
     for i, day in enumerate(dates):
         # Fill entries scheduled for today.
-        still_pending: list[tuple[pd.Timestamp, pd.Timestamp, str, float]] = []
-        for entry_date, signal_date, ticker, score in pending:
+        still_pending: list[tuple[pd.Timestamp, pd.Timestamp, str, float, int]] = []
+        for entry_date, signal_date, ticker, score, target_hold in pending:
             if entry_date != day:
-                still_pending.append((entry_date, signal_date, ticker, score))
+                still_pending.append((entry_date, signal_date, ticker, score, target_hold))
                 continue
             if ticker in open_positions or len(open_positions) >= max_positions:
                 continue
@@ -164,6 +171,7 @@ def simulate_portfolio(
                 entry_price=entry_price,
                 shares=shares,
                 score=score,
+                target_hold_days=target_hold,
                 hold_days=0,
                 peak_price=raw_price,
             )
@@ -198,13 +206,16 @@ def simulate_portfolio(
                 if pd.notna(day_score) and float(day_score) < exit_min_score:
                     close_position(ticker, day, close, "model_exit")
                     continue
+            if model_horizon_exit and pos.hold_days >= pos.target_hold_days:
+                close_position(ticker, day, close, "model_horizon")
+                continue
             if pos.hold_days >= max_holding_days:
                 close_position(ticker, day, close, "max_hold")
 
         # Schedule new entries for next close.
         if i + 1 < len(dates):
             next_day = dates[i + 1]
-            pending_next = sum(1 for ed, _, _, _ in pending if ed == next_day)
+            pending_next = sum(1 for ed, _, _, _, _ in pending if ed == next_day)
             free = max_positions - len(open_positions) - pending_next
             if free > 0:
                 try:
@@ -213,12 +224,18 @@ def simulate_portfolio(
                     day_slice = pd.DataFrame()
                 if not day_slice.empty:
                     candidates = day_slice.loc[day_slice[signal_col].fillna(False)]
-                    blocked = set(open_positions) | {t for _, _, t, _ in pending}
+                    blocked = set(open_positions) | {t for _, _, t, _, _ in pending}
                     candidates = candidates[~candidates.index.isin(blocked)]
                     if not candidates.empty:
                         ranked = candidates.sort_values(score_col, ascending=False)
                         for ticker, row in ranked.head(free).iterrows():
-                            pending.append((next_day, day, str(ticker), float(row[score_col])))
+                            if model_horizon_exit and hold_col in row.index and pd.notna(row[hold_col]):
+                                target_hold = int(max(1, min(max_holding_days, round(float(row[hold_col])))))
+                            else:
+                                target_hold = max_holding_days
+                            pending.append(
+                                (next_day, day, str(ticker), float(row[score_col]), target_hold)
+                            )
 
         n_open = len(open_positions)
         position_counts.append((day, n_open))
