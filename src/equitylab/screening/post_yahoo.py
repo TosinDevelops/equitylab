@@ -71,33 +71,22 @@ def compute_metrics(prices: pd.DataFrame) -> dict[str, float]:
     }
 
 
-def apply_screen(feature_panel: pd.DataFrame, config: ScreenConfig) -> pd.DataFrame:
-    data = feature_panel.copy()
-    signal = (
-        (data["drawdown_52w"] >= config.max_drawdown_52w)
-        & (data["rsi_14"] <= config.max_rsi)
-        & (data["relative_volume_20"] >= config.min_relative_volume)
+def passes_screen(feature_panel: pd.DataFrame, config: ScreenConfig) -> pd.Series:
+    """Boolean mask of rows that satisfy ScreenConfig (not stored as a column)."""
+    mask = (
+        (feature_panel["drawdown_52w"] >= config.max_drawdown_52w)
+        & (feature_panel["rsi_14"] <= config.max_rsi)
+        & (feature_panel["relative_volume_20"] >= config.min_relative_volume)
     )
     if config.min_distance_from_sma_200 is not None:
-        signal = signal & (
-            data["distance_from_sma_200"] >= config.min_distance_from_sma_200
+        mask = mask & (
+            feature_panel["distance_from_sma_200"] >= config.min_distance_from_sma_200
         )
     if config.max_distance_from_sma_200 is not None:
-        signal = signal & (
-            data["distance_from_sma_200"] <= config.max_distance_from_sma_200
+        mask = mask & (
+            feature_panel["distance_from_sma_200"] <= config.max_distance_from_sma_200
         )
-
-    data["entry_signal"] = signal.fillna(False)
-    data["signal_score"] = _signal_score(data)
-    return data
-
-
-def _signal_score(data: pd.DataFrame) -> pd.Series:
-    """Cross-sectional conviction score using latest metrics."""
-    drawdown_score = data["drawdown_52w"].rank(pct=True, ascending=False)
-    rsi_score = data["rsi_14"].rank(pct=True, ascending=False)
-    volume_score = data["relative_volume_20"].rank(pct=True, ascending=True)
-    return pd.concat([drawdown_score, rsi_score, volume_score], axis=1).mean(axis=1)
+    return mask.fillna(False)
 
 
 def _passes_screen(metrics: dict[str, float], config: ScreenConfig) -> bool:
@@ -169,6 +158,4 @@ def score_quotes(
     if not rows:
         return pd.DataFrame(), errors or ["No tickers could be scored."]
 
-    panel = pd.DataFrame(rows).set_index("ticker")
-    scored = apply_screen(panel, screen)
-    return scored, errors
+    return pd.DataFrame(rows).set_index("ticker"), errors

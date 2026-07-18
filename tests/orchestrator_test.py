@@ -18,9 +18,11 @@ def test_run_screen_returns_first_qualifiers_in_universe_order() -> None:
     ]
     scored = pd.DataFrame(
         {
-            "entry_signal": [True, False, True],
             "universe_rank": [0, 1, 2],
-            "signal_score": [0.1, 0.9, 0.2],
+            "drawdown_52w": [-0.10, -0.95, -0.20],
+            "rsi_14": [35.0, 35.0, 30.0],
+            "relative_volume_20": [1.5, 1.5, 1.5],
+            "distance_from_sma_200": [0.0, 0.0, 0.0],
         },
         index=["AAA", "BBB", "CCC"],
     )
@@ -31,7 +33,7 @@ def test_run_screen_returns_first_qualifiers_in_universe_order() -> None:
     ):
         results, errors = run_screen(
             UniverseConfig(),
-            ScreenConfig(),
+            ScreenConfig(max_drawdown_52w=-0.90, max_rsi=40.0, min_relative_volume=1.2),
             start=date(2024, 1, 1),
             end=date(2025, 1, 1),
             max_qualifiers=50,
@@ -39,4 +41,5 @@ def test_run_screen_returns_first_qualifiers_in_universe_order() -> None:
 
     assert errors == []
     assert list(results.index) == ["AAA", "CCC"]
-    assert results["entry_signal"].all()
+    assert "entry_signal" not in results.columns
+    assert "signal_score" not in results.columns

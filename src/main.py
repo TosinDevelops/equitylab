@@ -1,9 +1,11 @@
 from datetime import date, timedelta
 
+import pandas as pd
 import streamlit as st
 
 from equitylab.data.loaders.yahoo import load_data
 from equitylab.screening import ScreenConfig, UniverseConfig, run_screen
+from equitylab.strategy import StrategyConfig, run_walkforward_strategy
 
 st.set_page_config(page_title="EquityLab", layout="wide")
 st.title("EquityLab")
@@ -20,6 +22,12 @@ if "screen_label" not in st.session_state:
     st.session_state.screen_label = ""
 if "screen_range" not in st.session_state:
     st.session_state.screen_range = (default_start, today)
+if "strategy_result" not in st.session_state:
+    st.session_state.strategy_result = None
+# Drop cached results built with an older StrategyConfig (missing newer fields).
+_cached = st.session_state.strategy_result
+if _cached is not None and not hasattr(_cached.config, "profit_drawdown"):
+    st.session_state.strategy_result = None
 
 with st.sidebar:
     st.header("Date range")
@@ -69,6 +77,38 @@ with st.sidebar:
         max_sma_dist = st.number_input("Max distance from SMA200", value=0.05, step=0.05, format="%.2f")
 
     run = st.button("Run screen", type="primary", width="stretch")
+
+    st.header("Strategy / Backtest")
+    st.caption(
+        "Walk-forward predicts buy→sell profit over max holding days (train 80%, trade 20%)."
+    )
+    max_positions = st.number_input("Max positions", min_value=1, max_value=20, value=5, step=1)
+    max_holding_days = st.number_input("Max holding days", min_value=1, max_value=60, value=20, step=1)
+    train_fraction = st.slider("Train fraction", min_value=0.5, max_value=0.9, value=0.80, step=0.05)
+    entry_min_return_pct = st.number_input(
+        "Entry min predicted return (%)",
+        min_value=-5.0,
+        max_value=20.0,
+        value=0.0,
+        step=0.5,
+        help="Enter when model predicts N-day buy→sell return at least this high.",
+    )
+    profit_drawdown_pct = st.number_input(
+        "Profit drawdown exit (%)",
+        min_value=1.0,
+        max_value=50.0,
+        value=5.0,
+        step=1.0,
+        help="Exit when close falls this far below the peak price since entry.",
+    )
+    cost_bps = st.number_input("Cost (bps per side)", min_value=0.0, value=5.0, step=1.0)
+    use_stops = st.checkbox("Use stop / take-profit", value=False)
+    stop_loss = None
+    take_profit = None
+    if use_stops:
+        stop_loss = st.number_input("Stop loss", value=-0.08, step=0.01, format="%.2f")
+        take_profit = st.number_input("Take profit", value=0.15, step=0.01, format="%.2f")
+    run_wf = st.button("Run walk-forward", width="stretch")
 
 if not isinstance(start_date, date) or not isinstance(end_date, date):
     st.error("Select both a start and end date.")
@@ -134,16 +174,10 @@ if results.empty:
             st.write(st.session_state.screen_errors)
     st.stop()
 
-passes = results.loc[results["entry_signal"]].copy() if "entry_signal" in results.columns else results
 st.subheader("Screen results")
 st.caption(st.session_state.screen_label)
 
-if passes.empty or not passes["entry_signal"].any():
-    st.warning("Fetched 150 Yahoo names and scored them, but none passed post-screen. Showing scored candidates.")
-    display = results.head(int(max_tickers))
-else:
-    display = passes if len(passes) <= int(max_tickers) else passes.head(int(max_tickers))
-
+display = results if len(results) <= int(max_tickers) else results.head(int(max_tickers))
 tickers = list(display.index)
 
 show_cols = [
@@ -156,8 +190,6 @@ show_cols = [
         "relative_volume_20",
         "distance_from_sma_200",
         "market_cap",
-        "signal_score",
-        "entry_signal",
     ]
     if c in display.columns
 ]
@@ -195,3 +227,87 @@ st.subheader(selected)
 st.write(f"{len(prices)} bars · {prices.index.min().date()} → {prices.index.max().date()}")
 st.line_chart(prices["close"], height=320)
 st.dataframe(prices, width="stretch")
+
+if run_wf:
+    strategy = StrategyConfig(
+        max_positions=int(max_positions),
+        max_holding_days=int(max_holding_days),
+        train_fraction=float(train_fraction),
+        entry_min_return=float(entry_min_return_pct) / 100.0,
+        exit_min_return=None,
+        profit_drawdown=float(profit_drawdown_pct) / 100.0,
+        cost_bps=float(cost_bps),
+        stop_loss=float(stop_loss) if stop_loss is not None else None,
+        take_profit=float(take_profit) if take_profit is not None else None,
+    )
+    wf_progress = st.progress(0.0, text="Starting walk-forward…")
+
+    def on_wf_progress(fraction: float, message: str) -> None:
+        wf_progress.progress(min(max(fraction, 0.0), 1.0), text=message)
+
+    try:
+        st.session_state.strategy_result = run_walkforward_strategy(
+            tickers,
+            start=start_date,
+            end=end_date,
+            config=strategy,
+            progress=on_wf_progress,
+        )
+    except Exception as exc:
+        wf_progress.empty()
+        st.error(f"Walk-forward failed: {exc}")
+        st.stop()
+    wf_progress.empty()
+
+strategy_result = st.session_state.strategy_result
+if strategy_result is not None:
+    st.subheader("Walk-forward strategy (OOS)")
+    trail = (
+        f" · trail DD {strategy_result.config.profit_drawdown:.0%}"
+        if strategy_result.config.profit_drawdown is not None
+        else ""
+    )
+    st.caption(
+        f"Train through {strategy_result.train_end.date()} · "
+        f"Test from {strategy_result.test_start.date()} · "
+        f"{len(strategy_result.tickers)} tickers · "
+        f"max {strategy_result.config.max_positions} positions · "
+        f"hold ≤ {strategy_result.config.max_holding_days}d · "
+        f"enter pred ≥ {strategy_result.config.entry_min_return:.1%}"
+        f"{trail}"
+    )
+
+    oos = strategy_result.oos_backtest
+    metric_cols = st.columns(4)
+    metric_cols[0].metric("OOS total return", f"{oos.metrics['total_return']:.1%}")
+    metric_cols[1].metric("OOS Sharpe", f"{oos.metrics['sharpe']:.2f}")
+    metric_cols[2].metric("OOS max DD", f"{oos.metrics['max_drawdown']:.1%}")
+    metric_cols[3].metric("OOS trades", f"{int(oos.metrics['trade_count'])}")
+
+    st.line_chart(oos.equity, height=280)
+    if not oos.trades.empty:
+        st.dataframe(oos.trades, width="stretch")
+    else:
+        st.info("No OOS trades — try lowering entry probability or using more tickers / longer range.")
+
+    with st.expander("Model diagnostics"):
+        diag = pd.DataFrame(
+            {
+                "train": pd.Series(strategy_result.train_metrics),
+                "test": pd.Series(strategy_result.test_metrics),
+            }
+        )
+        st.dataframe(diag, width="stretch")
+        st.write("Feature importance (permutation, train sample)")
+        st.dataframe(strategy_result.feature_importance.to_frame(), width="stretch")
+        st.write("In-sample backtest (diagnostic only)")
+        is_bt = strategy_result.is_backtest
+        st.write(
+            f"Return {is_bt.metrics['total_return']:.1%} · "
+            f"Sharpe {is_bt.metrics['sharpe']:.2f} · "
+            f"Trades {int(is_bt.metrics['trade_count'])}"
+        )
+
+    if strategy_result.errors:
+        with st.expander(f"Price load errors ({len(strategy_result.errors)})"):
+            st.write(strategy_result.errors)

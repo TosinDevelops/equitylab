@@ -7,8 +7,8 @@ import pytest
 from equitylab.screening.post_yahoo import (
     ScreenConfig,
     _passes_screen,
-    apply_screen,
     compute_metrics,
+    passes_screen,
     rsi,
     sma,
 )
@@ -119,7 +119,7 @@ def test_passes_screen_max_drawdown_allows_milder_pullbacks() -> None:
     )
 
 
-def test_apply_screen_sets_entry_signal() -> None:
+def test_passes_screen_mask() -> None:
     panel = pd.DataFrame(
         {
             "drawdown_52w": [-0.10, -0.95],
@@ -130,11 +130,12 @@ def test_apply_screen_sets_entry_signal() -> None:
         index=["GOOD", "BAD"],
     )
     config = ScreenConfig(max_drawdown_52w=-0.90, max_rsi=40.0, min_relative_volume=1.2)
-    out = apply_screen(panel, config)
+    mask = passes_screen(panel, config)
 
-    assert bool(out.loc["GOOD", "entry_signal"]) is True
-    assert bool(out.loc["BAD", "entry_signal"]) is False
-    assert "signal_score" in out.columns
+    assert bool(mask.loc["GOOD"]) is True
+    assert bool(mask.loc["BAD"]) is False
+    assert "entry_signal" not in panel.columns
+    assert "signal_score" not in panel.columns
 
 
 def test_screen_config_label_uses_positive_drawdown_percent() -> None:
