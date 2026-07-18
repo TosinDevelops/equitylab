@@ -5,7 +5,7 @@ import streamlit as st
 
 from equitylab.data.loaders.yahoo import load_data
 from equitylab.screening import ScreenConfig, UniverseConfig, run_screen
-from equitylab.strategy import StrategyConfig, run_walkforward_strategy
+from equitylab.strategy import MODEL_LABELS, MODEL_NAMES, StrategyConfig, run_walkforward_strategy
 
 st.set_page_config(page_title="EquityLab", layout="wide")
 st.title("EquityLab")
@@ -29,6 +29,10 @@ _cached = st.session_state.strategy_result
 if _cached is not None and (
     not hasattr(_cached.config, "profit_drawdown")
     or not hasattr(_cached.config, "model_horizon_exit")
+    or not hasattr(_cached.config, "model_name")
+    or not hasattr(_cached.config, "test_step_days")
+    or not hasattr(_cached, "folds")
+    or not hasattr(_cached.oos_backtest, "open_positions")
 ):
     st.session_state.strategy_result = None
 
@@ -83,11 +87,42 @@ with st.sidebar:
 
     st.header("Strategy / Backtest")
     st.caption(
-        "Walk-forward predicts buy→sell profit over max holding days (train 80%, trade 20%)."
+        "Expanding walk-forward: train on the first chunk, test the next month, "
+        "retrain on all history so far, repeat, then backtest the glued OOS signals."
     )
     max_positions = st.number_input("Max positions", min_value=1, max_value=20, value=5, step=1)
     max_holding_days = st.number_input("Max holding days", min_value=1, max_value=60, value=20, step=1)
-    train_fraction = st.slider("Train fraction", min_value=0.5, max_value=0.9, value=0.80, step=0.05)
+    initial_capital = st.number_input(
+        "Starting cash ($)",
+        min_value=1_000.0,
+        max_value=10_000_000.0,
+        value=100_000.0,
+        step=10_000.0,
+        help="Portfolio starts with this cash. Each new slot targets ~equity / max positions.",
+    )
+    train_fraction = st.slider(
+        "Initial train fraction",
+        min_value=0.3,
+        max_value=0.8,
+        value=0.50,
+        step=0.05,
+        help="Size of the first training window only. Later folds expand.",
+    )
+    test_step_days = st.number_input(
+        "Test step (trading days)",
+        min_value=5,
+        max_value=63,
+        value=21,
+        step=1,
+        help="Out-of-sample chunk length before each retrain (~21 ≈ 1 month).",
+    )
+    model_name = st.selectbox(
+        "Model",
+        options=list(MODEL_NAMES),
+        index=list(MODEL_NAMES).index("hist_gradient_boosting"),
+        format_func=lambda key: MODEL_LABELS[key],
+        help="Regressor used inside multi-horizon walk-forward (one model per hold day 1..N).",
+    )
     entry_min_return_pct = st.number_input(
         "Entry min predicted return (%)",
         min_value=-5.0,
@@ -244,6 +279,8 @@ if run_wf:
         max_positions=int(max_positions),
         max_holding_days=int(max_holding_days),
         train_fraction=float(train_fraction),
+        test_step_days=int(test_step_days),
+        model_name=model_name,
         entry_min_return=float(entry_min_return_pct) / 100.0,
         exit_min_return=None,
         profit_drawdown=(float(profit_drawdown_pct) / 100.0) if use_profit_drawdown else None,
@@ -251,6 +288,7 @@ if run_wf:
         cost_bps=float(cost_bps),
         stop_loss=float(stop_loss) if stop_loss is not None else None,
         take_profit=float(take_profit) if take_profit is not None else None,
+        initial_capital=float(initial_capital),
     )
     wf_progress = st.progress(0.0, text="Starting walk-forward…")
 
@@ -281,8 +319,12 @@ if strategy_result is not None:
         exit_bits.append(f"trail DD {strategy_result.config.profit_drawdown:.0%}")
     exit_bits.append(f"hold ≤ {strategy_result.config.max_holding_days}d")
     st.caption(
-        f"Train through {strategy_result.train_end.date()} · "
-        f"Test from {strategy_result.test_start.date()} · "
+        f"Model {MODEL_LABELS.get(strategy_result.config.model_name, strategy_result.config.model_name)} · "
+        f"start ${strategy_result.config.initial_capital:,.0f} · "
+        f"{len(strategy_result.folds)} folds · "
+        f"first train through {strategy_result.train_end.date()} · "
+        f"OOS from {strategy_result.test_start.date()} · "
+        f"step {strategy_result.config.test_step_days}d · "
         f"{len(strategy_result.tickers)} tickers · "
         f"max {strategy_result.config.max_positions} positions · "
         f"enter pred ≥ {strategy_result.config.entry_min_return:.1%} · "
@@ -290,17 +332,48 @@ if strategy_result is not None:
     )
 
     oos = strategy_result.oos_backtest
-    metric_cols = st.columns(4)
+    start_cash = float(strategy_result.config.initial_capital)
+    end_equity = float(oos.equity.iloc[-1]) if len(oos.equity) else start_cash
+    metric_cols = st.columns(5)
     metric_cols[0].metric("OOS total return", f"{oos.metrics['total_return']:.1%}")
     metric_cols[1].metric("OOS Sharpe", f"{oos.metrics['sharpe']:.2f}")
     metric_cols[2].metric("OOS max DD", f"{oos.metrics['max_drawdown']:.1%}")
     metric_cols[3].metric("OOS trades", f"{int(oos.metrics['trade_count'])}")
+    metric_cols[4].metric("End equity", f"${end_equity:,.0f}", delta=f"${end_equity - start_cash:,.0f}")
+
+    if strategy_result.folds:
+        fold_rows = [
+            {
+                "fold": i + 1,
+                "train_end": f.train_end.date(),
+                "test_start": f.test_start.date(),
+                "test_end": f.test_end.date(),
+                "test_mae": f.test_metrics.get("mae"),
+                "test_signal_rate": f.test_metrics.get("signal_rate"),
+                "test_rows": f.test_metrics.get("n_rows"),
+            }
+            for i, f in enumerate(strategy_result.folds)
+        ]
+        with st.expander(f"Walk-forward folds ({len(strategy_result.folds)})"):
+            st.dataframe(pd.DataFrame(fold_rows), width="stretch")
 
     st.line_chart(oos.equity, height=280)
     if not oos.trades.empty:
+        st.subheader("Closed OOS trades")
         st.dataframe(oos.trades, width="stretch")
     else:
-        st.info("No OOS trades — try lowering entry probability or using more tickers / longer range.")
+        st.info("No closed OOS trades — try lowering entry min return or using more tickers / longer range.")
+    if not oos.open_positions.empty:
+        st.subheader("Open positions at end of data")
+        st.caption(
+            "Left open on purpose (no end_of_data force-close). "
+            "score = predicted_return at entry; target_hold_days = model argmax hold."
+        )
+        st.dataframe(oos.open_positions, width="stretch")
+    elif oos.trades.empty:
+        pass
+    else:
+        st.caption("No open positions at the last bar.")
 
     with st.expander("Model diagnostics"):
         diag = pd.DataFrame(
@@ -310,7 +383,7 @@ if strategy_result is not None:
             }
         )
         st.dataframe(diag, width="stretch")
-        st.write("Feature importance (permutation, train sample)")
+        st.write("Feature importance (permutation, averaged across folds)")
         st.dataframe(strategy_result.feature_importance.to_frame(), width="stretch")
         st.write("In-sample backtest (diagnostic only)")
         is_bt = strategy_result.is_backtest

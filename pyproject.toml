@@ -17,6 +17,7 @@ dependencies = [
     "pandas",
     "scikit-learn",
     "streamlit",
+    "xgboost>=3.2.0",
     "yfinance",
 ]
 license = "MIT"

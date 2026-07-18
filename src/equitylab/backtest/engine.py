@@ -13,6 +13,7 @@ class BacktestResult:
     trades: pd.DataFrame
     metrics: dict[str, float]
     positions_by_day: pd.Series
+    open_positions: pd.DataFrame
 
 
 @dataclass
@@ -48,6 +49,57 @@ def _empty_trades() -> pd.DataFrame:
     )
 
 
+def _empty_open_positions() -> pd.DataFrame:
+    return pd.DataFrame(
+        columns=[
+            "ticker",
+            "signal_date",
+            "entry_date",
+            "asof_date",
+            "entry_price",
+            "last_price",
+            "shares",
+            "unrealized_pnl",
+            "unrealized_pnl_pct",
+            "hold_days",
+            "target_hold_days",
+            "score",
+        ]
+    )
+
+
+def _snapshot_open_positions(
+    open_positions: dict[str, _OpenPosition],
+    asof: pd.Timestamp,
+    close_lookup: pd.DataFrame,
+) -> pd.DataFrame:
+    if not open_positions:
+        return _empty_open_positions()
+    rows: list[dict] = []
+    for pos in open_positions.values():
+        if pos.ticker in close_lookup.columns and not pd.isna(close_lookup.at[asof, pos.ticker]):
+            last_price = float(close_lookup.at[asof, pos.ticker])
+        else:
+            last_price = pos.entry_price
+        rows.append(
+            {
+                "ticker": pos.ticker,
+                "signal_date": pos.signal_date,
+                "entry_date": pos.entry_date,
+                "asof_date": asof,
+                "entry_price": pos.entry_price,
+                "last_price": last_price,
+                "shares": pos.shares,
+                "unrealized_pnl": pos.shares * (last_price - pos.entry_price),
+                "unrealized_pnl_pct": last_price / pos.entry_price - 1.0,
+                "hold_days": pos.hold_days,
+                "target_hold_days": pos.target_hold_days,
+                "score": pos.score,
+            }
+        )
+    return pd.DataFrame(rows).sort_values("score", ascending=False).reset_index(drop=True)
+
+
 def simulate_portfolio(
     panel: pd.DataFrame,
     *,
@@ -72,6 +124,9 @@ def simulate_portfolio(
 
     Exits (in order): stop / take-profit / profit_drawdown / model score drop /
     model_horizon_exit (hold_days reaches predicted best day) / max_holding_days.
+
+    Positions still open at the last bar are left open (no synthetic end_of_data
+    exit) and returned in ``open_positions`` with model score / target hold.
     """
     if max_positions < 1:
         raise ValueError("max_positions must be >= 1")
@@ -85,6 +140,7 @@ def simulate_portfolio(
             trades=empty_trades,
             metrics=compute_metrics(empty_eq, empty_trades),
             positions_by_day=pd.Series(dtype=float, name="n_positions"),
+            open_positions=_empty_open_positions(),
         )
 
     required = {"close", "high", "low", signal_col, score_col}
@@ -243,15 +299,12 @@ def simulate_portfolio(
             fully_invested_days += 1
         equity_points.append((day, mark_to_market(day)))
 
-    if dates.size and open_positions:
-        last = dates[-1]
-        for ticker, pos in list(open_positions.items()):
-            if ticker in close_lookup.columns and not pd.isna(close_lookup.at[last, ticker]):
-                exit_raw = float(close_lookup.at[last, ticker])
-            else:
-                exit_raw = pos.entry_price
-            close_position(ticker, last, exit_raw, "end_of_data")
-        equity_points[-1] = (last, cash)
+    last = dates[-1] if dates.size else None
+    open_df = (
+        _snapshot_open_positions(open_positions, last, close_lookup)
+        if last is not None
+        else _empty_open_positions()
+    )
 
     equity = pd.Series({d: v for d, v in equity_points}, name="equity", dtype=float).sort_index()
     trades_df = pd.DataFrame(trades) if trades else _empty_trades()
@@ -265,10 +318,12 @@ def simulate_portfolio(
     metrics["pct_days_fully_invested"] = (
         fully_invested_days / len(dates) if len(dates) else 0.0
     )
+    metrics["open_position_count"] = float(len(open_df))
 
     return BacktestResult(
         equity=equity,
         trades=trades_df,
         metrics=metrics,
         positions_by_day=positions_by_day,
+        open_positions=open_df,
     )

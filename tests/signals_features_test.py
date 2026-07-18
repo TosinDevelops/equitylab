@@ -29,10 +29,13 @@ def test_build_feature_frame_has_expected_columns_and_warmup_nans() -> None:
     for col in FEATURE_COLUMNS:
         assert col in frame.columns
     assert frame["ticker"].eq("AAA").all()
-    # SMA200 / 52w need 200+ / 252 bars
-    assert frame["distance_from_sma_200"].iloc[:199].isna().all()
+    # EWMA200 (min_periods=200) / 52w need 200+ / 252 bars
+    assert frame["distance_from_ewma_200"].iloc[:199].isna().all()
     assert frame["drawdown_52w"].iloc[:251].isna().all()
     assert frame["rsi_14"].iloc[:13].isna().all()
+    assert frame["atr_14_pct"].iloc[:13].isna().all()
+    # MACD hist needs EMA26 + signal9 warm-up
+    assert frame["macd_hist"].iloc[:33].isna().all()
     assert frame[FEATURE_COLUMNS].iloc[-1].notna().all()
 
 

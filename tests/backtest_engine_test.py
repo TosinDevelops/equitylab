@@ -163,6 +163,39 @@ def test_model_exit_when_predicted_return_drops() -> None:
     assert trade["exit_price"] == pytest.approx(101.0)
 
 
+def test_open_positions_left_open_at_end_of_data() -> None:
+    # Enter day 1, max_hold=10, only 4 bars → still open at the end (no end_of_data exit).
+    closes = {"AAA": [100.0, 101.0, 102.0, 103.0]}
+    signals = {"AAA": [True, False, False, False]}
+    scores = {"AAA": [0.07, 0.07, 0.07, 0.07]}
+    holds = {"AAA": [5.0, 5.0, 5.0, 5.0]}
+    panel = _panel_from_closes(closes, signals, scores, holds=holds)
+
+    result = simulate_portfolio(
+        panel,
+        max_positions=1,
+        max_holding_days=10,
+        cost_bps=0.0,
+        exit_min_score=None,
+        profit_drawdown=None,
+        model_horizon_exit=True,
+        initial_capital=10_000.0,
+    )
+
+    assert result.trades.empty
+    assert len(result.open_positions) == 1
+    open_row = result.open_positions.iloc[0]
+    assert open_row["ticker"] == "AAA"
+    assert open_row["score"] == pytest.approx(0.07)
+    assert open_row["target_hold_days"] == 5
+    assert open_row["hold_days"] == 2  # aged on days 2 and 3
+    assert open_row["last_price"] == pytest.approx(103.0)
+    assert result.metrics["open_position_count"] == 1.0
+    # Equity still marks open stock to market (not forced to cash).
+    shares = 10_000.0 / 101.0
+    assert result.equity.iloc[-1] == pytest.approx(shares * 103.0)
+
+
 def test_stop_loss_exits_early() -> None:
     closes = {"AAA": [100.0, 100.0, 90.0, 90.0]}
     signals = {"AAA": [True, False, False, False]}

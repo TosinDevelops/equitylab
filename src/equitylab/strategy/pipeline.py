@@ -11,7 +11,11 @@ from equitylab.data.loaders.yahoo import load_data, normalize_ticker
 from equitylab.signals.features import build_feature_panel
 from equitylab.signals.labels import attach_labels
 from equitylab.strategy.config import StrategyConfig
-from equitylab.strategy.walkforward import WalkForwardModelResult, fit_predict_walkforward
+from equitylab.strategy.walkforward import (
+    WalkForwardFoldResult,
+    WalkForwardModelResult,
+    fit_predict_walkforward,
+)
 
 
 @dataclass(frozen=True)
@@ -27,6 +31,7 @@ class StrategyResult:
     is_backtest: BacktestResult
     panel: pd.DataFrame
     errors: list[str]
+    folds: list[WalkForwardFoldResult]
 
 
 def _load_price_map(
@@ -73,7 +78,7 @@ def run_walkforward_strategy(
     progress: Callable[[float, str], None] | None = None,
 ) -> StrategyResult:
     """
-    Load prices → features/labels → 80/20 ML walk-forward → OOS portfolio backtest.
+    Load prices → features/labels → expanding walk-forward → OOS portfolio backtest.
 
     Pass price_map in tests to avoid network I/O.
     """
@@ -105,9 +110,11 @@ def run_walkforward_strategy(
         raise ValueError("Feature panel is empty for the selected date range")
 
     if progress is not None:
-        progress(0.9, "Fitting walk-forward model…")
+        progress(0.9, "Fitting walk-forward folds…")
 
-    wf: WalkForwardModelResult = fit_predict_walkforward(panel, config)
+    wf: WalkForwardModelResult = fit_predict_walkforward(
+        panel, config, progress=progress
+    )
     scored = wf.panel
 
     oos = scored.loc[scored.index.get_level_values("date") >= wf.test_start]
@@ -162,4 +169,5 @@ def run_walkforward_strategy(
         is_backtest=is_bt,
         panel=scored,
         errors=errors,
+        folds=list(wf.folds),
     )
