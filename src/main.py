@@ -182,7 +182,7 @@ if run:
         max_distance_from_sma_200=float(max_sma_dist) if max_sma_dist is not None else None,
     )
 
-    progress = st.progress(0.0, text="Fetching Yahoo universe…")
+    progress = st.progress(0.0, text="Fetching Yahoo Tickers...")
 
     def on_progress(fraction: float, message: str) -> None:
         progress.progress(min(max(fraction, 0.0), 1.0), text=message)
@@ -214,7 +214,7 @@ if results is None:
     st.stop()
 
 if results.empty:
-    st.warning("No tickers scored. Try loosening universe filters.")
+    st.warning("No tickers within params. Try loosening universe filters.")
     if st.session_state.screen_errors:
         with st.expander("Errors"):
             st.write(st.session_state.screen_errors)
@@ -241,9 +241,6 @@ show_cols = [
 ]
 st.dataframe(display[show_cols], width="stretch")
 
-if st.session_state.screen_errors:
-    with st.expander(f"Skipped / errors ({len(st.session_state.screen_errors)})"):
-        st.write(st.session_state.screen_errors)
 
 default_ticker = st.session_state.get("selected_ticker")
 if default_ticker not in tickers:
