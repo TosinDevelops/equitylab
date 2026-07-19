@@ -59,7 +59,7 @@ def attach_labels(
     for ticker, group in panel.groupby(level="ticker", sort=False):
         closes = group["close"].droplevel("ticker")
         labeled = make_labels(closes, max_holding_days, min_forward_return)
-        labeled["ticker"] = ticker
+        labeled["ticker"] = str(ticker)
         labeled.index.name = "date"
         parts.append(labeled.reset_index().set_index(["date", "ticker"]))
 

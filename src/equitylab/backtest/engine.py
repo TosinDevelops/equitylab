@@ -1,10 +1,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any, cast
 
 import pandas as pd
 
 from equitylab.backtest.metrics import compute_metrics
+
+
+def _at(frame: pd.DataFrame, day: pd.Timestamp, ticker: str) -> float:
+    """Typed float read of a single (day, ticker) cell from a wide lookup frame."""
+    return float(cast(Any, frame.at[day, ticker]))
 
 
 @dataclass(frozen=True)
@@ -78,7 +84,7 @@ def _snapshot_open_positions(
     rows: list[dict] = []
     for pos in open_positions.values():
         if pos.ticker in close_lookup.columns and not pd.isna(close_lookup.at[asof, pos.ticker]):
-            last_price = float(close_lookup.at[asof, pos.ticker])
+            last_price = _at(close_lookup, asof, pos.ticker)
         else:
             last_price = pos.entry_price
         rows.append(
@@ -170,7 +176,7 @@ def simulate_portfolio(
         value = cash
         for pos in open_positions.values():
             if pos.ticker in close_lookup.columns and not pd.isna(close_lookup.at[asof, pos.ticker]):
-                price = float(close_lookup.at[asof, pos.ticker])
+                price = _at(close_lookup, asof, pos.ticker)
             else:
                 price = pos.entry_price
             value += pos.shares * price
@@ -214,7 +220,7 @@ def simulate_portfolio(
 
             equity_now = mark_to_market(day)
             alloc = equity_now / max_positions
-            raw_price = float(close_lookup.at[day, ticker])
+            raw_price = _at(close_lookup, day, ticker)
             entry_price = raw_price * (1.0 + cost)
             if entry_price <= 0 or alloc <= 0:
                 continue
@@ -241,9 +247,9 @@ def simulate_portfolio(
                 continue
 
             pos.hold_days += 1
-            high = float(high_lookup.at[day, ticker])
-            low = float(low_lookup.at[day, ticker])
-            close = float(close_lookup.at[day, ticker])
+            high = _at(high_lookup, day, ticker)
+            low = _at(low_lookup, day, ticker)
+            close = _at(close_lookup, day, ticker)
             pos.peak_price = max(pos.peak_price, high)
 
             if stop_loss is not None and low <= pos.entry_price * (1.0 + stop_loss):
@@ -259,7 +265,7 @@ def simulate_portfolio(
                     continue
             if exit_min_score is not None and ticker in score_lookup.columns:
                 day_score = score_lookup.at[day, ticker]
-                if pd.notna(day_score) and float(day_score) < exit_min_score:
+                if pd.notna(day_score) and float(cast(Any, day_score)) < exit_min_score:
                     close_position(ticker, day, close, "model_exit")
                     continue
             if model_horizon_exit and pos.hold_days >= pos.target_hold_days:
@@ -275,7 +281,7 @@ def simulate_portfolio(
             free = max_positions - len(open_positions) - pending_next
             if free > 0:
                 try:
-                    day_slice = panel.xs(day, level="date")
+                    day_slice = cast(pd.DataFrame, panel.xs(day, level="date"))
                 except KeyError:
                     day_slice = pd.DataFrame()
                 if not day_slice.empty:
@@ -283,14 +289,14 @@ def simulate_portfolio(
                     blocked = set(open_positions) | {t for _, _, t, _, _ in pending}
                     candidates = candidates[~candidates.index.isin(blocked)]
                     if not candidates.empty:
-                        ranked = candidates.sort_values(score_col, ascending=False)
-                        for ticker, row in ranked.head(free).iterrows():
+                        ranked = candidates.sort_values(by=score_col, ascending=False)
+                        for cand_ticker, row in ranked.head(free).iterrows():
                             if model_horizon_exit and hold_col in row.index and pd.notna(row[hold_col]):
                                 target_hold = int(max(1, min(max_holding_days, round(float(row[hold_col])))))
                             else:
                                 target_hold = max_holding_days
                             pending.append(
-                                (next_day, day, str(ticker), float(row[score_col]), target_hold)
+                                (next_day, day, str(cand_ticker), float(row[score_col]), target_hold)
                             )
 
         n_open = len(open_positions)

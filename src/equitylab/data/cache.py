@@ -172,9 +172,10 @@ def load_cached_prices(
                 _fetch_and_upsert(con, ticker, cached_max + timedelta(days=1), end_d, fetch_fn)
 
         # Recompute meta even if fetch returned nothing (touch last_accessed).
-        has_rows = con.execute(
+        count_row = con.execute(
             "SELECT COUNT(*) FROM prices WHERE ticker = ?", [ticker]
-        ).fetchone()[0]
+        ).fetchone()
+        has_rows = count_row[0] if count_row is not None else 0
         if has_rows:
             _refresh_meta(con, ticker)
         else:

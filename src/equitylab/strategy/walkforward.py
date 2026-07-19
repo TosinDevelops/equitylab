@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable
+from typing import Callable, cast
 
 import numpy as np
 import pandas as pd
@@ -75,7 +75,7 @@ class WalkForwardModelResult:
 
 
 def chronological_split_dates(
-    dates: pd.DatetimeIndex,
+    dates: pd.Index,
     train_fraction: float,
 ) -> tuple[pd.Timestamp, pd.Timestamp]:
     """Return (last_train_date, first_test_date) for a chronological split."""
@@ -90,7 +90,7 @@ def chronological_split_dates(
 
 
 def iter_walkforward_folds(
-    dates: pd.DatetimeIndex,
+    dates: pd.Index,
     train_fraction: float,
     test_step_days: int,
 ) -> list[tuple[pd.Timestamp, pd.Timestamp, pd.Timestamp]]:
@@ -105,7 +105,7 @@ def iter_walkforward_folds(
 
     unique = pd.DatetimeIndex(sorted(pd.DatetimeIndex(dates).unique()))
     _, first_test_start = chronological_split_dates(unique, train_fraction)
-    test_start_idx = int(unique.get_loc(first_test_start))
+    test_start_idx = cast(int, unique.get_loc(first_test_start))
 
     folds: list[tuple[pd.Timestamp, pd.Timestamp, pd.Timestamp]] = []
     while test_start_idx < len(unique):
@@ -119,7 +119,7 @@ def iter_walkforward_folds(
 
 
 def label_embargo_cutoff(
-    dates: pd.DatetimeIndex,
+    dates: pd.Index,
     train_end: pd.Timestamp,
     max_holding_days: int,
 ) -> pd.Timestamp:
@@ -280,7 +280,7 @@ def fit_predict_walkforward(
             )
 
         y_train = train[y_cols].astype(float)
-        if float(y_train.stack().std()) == 0.0:
+        if float(y_train.to_numpy().std()) == 0.0:
             raise ValueError(
                 f"Fold {fold_i + 1}: training forward returns have zero variance"
             )
